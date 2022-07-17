@@ -18,6 +18,7 @@ async function main() {
       });
       await listenClient.query("LISTEN wake");
 
+      console.log("listening at %s", new Date().toISOString());
       wake.set();
       while (true) {
         await wake.waitAndReset();
