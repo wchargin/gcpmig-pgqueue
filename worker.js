@@ -21,13 +21,18 @@ async function main() {
       wake.set();
       while (true) {
         await wake.waitAndReset();
-        await db.acqrel(pool, (client) => consumeAll(client));
+        async function worker(i) {
+          console.log(`core ${i}: spinning up worker`);
+          await db.acqrel(pool, (client) => consumeAll(client, i));
+          console.log(`core ${i}: done`);
+        }
+        await Promise.all(os.cpus().map((_, i) => worker(i)));
       }
     });
   });
 }
 
-async function consumeAll(client) {
+async function consumeAll(client, i) {
   while (true) {
     await client.query("BEGIN");
     const claimRes = await client.query(
@@ -52,7 +57,7 @@ async function consumeAll(client) {
       return;
     }
     const [{ reqId, difficulty }] = claimRes.rows;
-    console.log(`got request ${reqId} at difficulty ${difficulty}`);
+    console.log(`core ${i}: got request ${reqId} at difficulty ${difficulty}`);
 
     const jobScript = path.join(__dirname, "job.js");
     const tmpdir = await util.promisify(fs.mkdtemp)(
@@ -94,7 +99,7 @@ async function consumeAll(client) {
       `,
       [reqId, result]
     );
-    console.log(`finished request ${reqId}`);
+    console.log(`core ${i}: finished request ${reqId}`);
 
     const contents = await client.query("COMMIT");
   }
