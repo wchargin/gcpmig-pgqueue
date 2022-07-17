@@ -59,7 +59,7 @@ Make sure to set libpq environment variables. The "equivalent command line" outp
 
 ```sh
 gcloud compute instance-templates create-with-container \
-  my-instance-group \
+  my-instance-template \
   --project=my-project \
   --machine-type=e2-medium \
   --network-interface=network=default,network-tier=PREMIUM \
@@ -86,7 +86,9 @@ Presumably this is a bug in the GCP web UI.
 Presumably there's a way around this.
 
 In the above template, I've pinned a hash for the image.
-I think that this is what's wanted, and you can fork the template when you want to deploy from a new image?
+To update, you can fork the template to point to a new hash, then update the autoscaler to point to the new template and restart the VMs (replacing doesn't seem to be necessary).
+Alternatively, you can set `gcpmig-pgqueue:latest` in the template, in which case each VM deployment will be independently created at the latest version by the autoscaler.
+Be aware of potential skew, but updating is easier.
 
 Then, use the Compute Engine web UI to create a managed instance group based on this template.
 All the default settings are fine!
@@ -98,7 +100,14 @@ To check on it, you can `gcloud compute ssh` into the VM.
 Run `docker ps` and see if there's a container running the `gcr.io/my-project/gcpmig-pgqueue` image.
 If there is, grab its ID and run `docker logs CONTAINER_ID` or `docker attach CONTAINER_ID` to see historical or live logs, respectively.
 If there's not, the system is probably still booting up and trying to start the job.
+(You may see a `konlet` container running.)
 You can keep an eye on `docker image ls` and `docker ps`.
+
+Shortcut: `docker logs $(docker ps -qn1)`.
+Useful with `gcloud compute ssh --command`.
+
+With the `FROM node:16` image, time-to-container-start seems to be about 9 to 10 seconds when restarting a VM, or about 37 to 38 seconds when creating a VM from scratch (incl. replacing a VM).
+When using Alpine instead with `FROM node:16-alpine`, the startup time is about the same, but the compressed image is 39 MB instead of 333 MB.
 
 Eventually, the logs should indicate that the job is listening.
 (You could also check `pg_stat_activity`, I suppose.)
@@ -112,11 +121,21 @@ The instance should start doing work, which you can observe via its logs or by d
 Then, if all goes well, the autoscaler should see that its CPU is pegged, and should spin up more instances.
 Once all the work is done and something like 10 minutes have gone by (the "stabilization period"), the autoscaler should delete most of the instances again.
 
+To update to a new instance template or to pull a new `:latest` version on all the existing instances:
+
+```sh
+gcloud beta compute instance-groups managed rolling-action start-update \
+  my-instance-group \
+  --zone=us-central1-a \
+  --version=template=my-instance-template \
+  ;
+```
+
 ## TODOs
 
   - Health checks.
   - Removing public IPs on nodes, probably?
     Would be nice to be able to access those from inside the cluster but not need to expose each one directly to the internet.
-  - Managing updates and deploys.
-    It should be as easy as changing the instance template on the instance group and then replacing the existing VMs, I think.
-    But there's still a bit of automation to do there to make it ergonomic.
+    However, when I naively try to remove the ephemeral external IP from the network interface in the instance template, the created instances seem to misbehave.
+    They have `docker` installed, but `docker image ls` and `docker ps` are always empty, and they don't actually start the worker as desired.
+    To investigate.
