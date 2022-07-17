@@ -7,4 +7,4 @@ RUN npm install
 
 COPY . .
 
-ENTRYPOINT node worker.js
+ENTRYPOINT ./index.sh
