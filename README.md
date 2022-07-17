@@ -1,5 +1,10 @@
 # gcpmig-pgqueue
 
+Proof-of-concept autoscaling work queue.
+
+This uses a Postgres database as a work queue and notification service, with jobs processed by one or more stateless job servers.
+The servers are autoscaled based on CPU load on GCP VMs via a managed instance group.
+
 ## Demo locally
 
 Initialize a database:
