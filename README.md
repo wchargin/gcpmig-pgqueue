@@ -43,6 +43,80 @@ Tear down your workers:
 kill %1 %2 %3
 ```
 
-You can also kill one or more workers while it's executing a job and
-note that its job is eventually picked up by one of the other workers
-after it's unlocked due to the client disconnection.
+You can also kill one or more workers while it's executing a job and note that its job is eventually picked up by one of the other workers after it's unlocked due to the client disconnection.
+
+## Run on GCP
+
+First, build the Docker image and push it to a GCP container registry:
+
+```sh
+docker build -t gcr.io/my-project/gcpmig-pgqueue .  # note the dot
+docker push gcr.io/my-project/gcpmig-pgqueue
+```
+
+Then, use the Compute Engine web UI to create an instance template based on this container.
+Make sure to set libpq environment variables. The "equivalent command line" output should look something like this:
+
+```sh
+gcloud compute instance-templates create-with-container \
+  my-instance-group \
+  --project=my-project \
+  --machine-type=e2-medium \
+  --network-interface=network=default,network-tier=PREMIUM \
+  --maintenance-policy=MIGRATE \
+  --provisioning-model=STANDARD \
+  --service-account=651075703403-compute@developer.gserviceaccount.com \
+  --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append \
+  --container-image=gcr.io/my-project/gcpmig-pgqueue@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --container-restart-policy=always \
+  --container-privileged \
+  --container-stdin \
+  --container-tty \
+  --container-env=PGHOST=xxx,PGDATABASE=scratch,PGUSER=yyy,PGPASSWORD=zzz \
+  --create-disk=auto-delete=yes,boot=yes,device-name=worker-template-10,image=projects/cos-cloud/global/images/cos-stable-97-16919-103-10,mode=rw,size=10,type=pd-balanced \
+  --no-shielded-secure-boot \
+  --shielded-vtpm \
+  --shielded-integrity-monitoring \
+  --labels=container-vm=cos-stable-97-16919-103-10 \
+  ;
+```
+
+...but my `gcloud(1)` doesn't seem to want to process the `boot=yes` flag to the `--create-disk` argument.
+Presumably this is a bug in the GCP web UI.
+Presumably there's a way around this.
+
+In the above template, I've pinned a hash for the image.
+I think that this is what's wanted, and you can fork the template when you want to deploy from a new image?
+
+Then, use the Compute Engine web UI to create a managed instance group based on this template.
+All the default settings are fine!
+Add and remove instances, min=1 max=10, 60% CPU utilization, 60 second "cool down" (really warm up? confusing name) period.
+Should probably add health checks and autohealing, but this is a proof of concept.
+
+After creating the group, wait for it to spin up an instance.
+To check on it, you can `gcloud compute ssh` into the VM.
+Run `docker ps` and see if there's a container running the `gcr.io/my-project/gcpmig-pgqueue` image.
+If there is, grab its ID and run `docker logs CONTAINER_ID` or `docker attach CONTAINER_ID` to see historical or live logs, respectively.
+If there's not, the system is probably still booting up and trying to start the job.
+You can keep an eye on `docker image ls` and `docker ps`.
+
+Eventually, the logs should indicate that the job is listening.
+(You could also check `pg_stat_activity`, I suppose.)
+At that point (or before or after, really), add a whole bunch of jobs:
+
+```sh
+node add.js 3000 128
+```
+
+The instance should start doing work, which you can observe via its logs or by dumping the `responses` table.
+Then, if all goes well, the autoscaler should see that its CPU is pegged, and should spin up more instances.
+Once all the work is done and something like 10 minutes have gone by (the "stabilization period"), the autoscaler should delete most of the instances again.
+
+## TODOs
+
+  - Health checks.
+  - Removing public IPs on nodes, probably?
+    Would be nice to be able to access those from inside the cluster but not need to expose each one directly to the internet.
+  - Managing updates and deploys.
+    It should be as easy as changing the instance template on the instance group and then replacing the existing VMs, I think.
+    But there's still a bit of automation to do there to make it ergonomic.
